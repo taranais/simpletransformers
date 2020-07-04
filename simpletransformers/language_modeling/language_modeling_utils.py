@@ -1,6 +1,7 @@
 import logging
 import os
 import pickle
+import linecache
 from multiprocessing import Pool
 from typing import Tuple
 
@@ -135,28 +136,39 @@ class SimpleDataset(Dataset):
         return torch.tensor(self.examples[item], dtype=torch.long)
 
 class LineByLineLazyTextDataset(Dataset):
-    def __init__(self, tokenizer: PreTrainedTokenizer, args, file_path: str, block_size=512):
-        assert os.path.isfile(file_path)
-       
-        logger.info(" Getting features from dataset file at %s", file_path)
-        self.examples = []
-        #lines = []
-        with open(file_path, encoding="utf-8") as f:
-            #lines = [line for line in f.read().splitlines() if (len(line) > 0 and not line.isspace())]
-            while True: 
-                # Get next line from file 
-                line = f.readline() 
-                if not line: 
-                    break 
-                if (len(line) > 0 and not line.isspace()):
-                    #lines.append(line)
-                    self.examples.append(tokenizer.encode(line))
+    """
+    Credit: @bramvanroy for this linecache implementation.
+    https://github.com/huggingface/transformers/pull/3388
+    """
+
+    def __init__(self, file_path):
+        self.file_path = file_path
+        self.num_entries = self._get_n_lines(self.file_path)
+
+    @staticmethod
+    def _get_n_lines(fin, size=65536):
+        # borrowed from https://stackoverflow.com/a/9631635/1150683
+        def blocks(files):
+            while True:
+                b = files.read(size)
+                if not b:
+                    break
+                yield b
+
+        with open(fin, encoding="utf-8") as fhin:
+            n_lines = sum(bl.count("\n") for bl in blocks(fhin))
+        return n_lines
+
+    def __getitem__(self, idx):
+        """
+        :param idx (int): the index of the line to get
+        :return (str or None): The line as a string (newline removed) or None if there is an exception.
+        """
+        # linecache starts counting from one, not zero, +1 the given index
+        return linecache.getline(self.file_path, idx + 1).rstrip()
 
     def __len__(self):
-        return len(self.examples)
-
-    def __getitem__(self, i):
-        return torch.tensor(self.examples[i], dtype=torch.long)
+        return self.num_entries
 
 def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args) -> Tuple[torch.Tensor, torch.Tensor]:
     """ Prepare masked tokens inputs/labels for masked language modeling: 80% MASK, 10% random, 10% original. """
