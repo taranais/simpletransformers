@@ -30,6 +30,7 @@ from simpletransformers.config.model_args import LanguageModelingArgs
 from simpletransformers.custom_models.models import ElectraForLanguageModelingModel
 from simpletransformers.language_modeling.language_modeling_utils import (
     SimpleDataset,
+    LineByLineLazyTextDataset,
     mask_tokens,
 )
 from tensorboardX import SummaryWriter
@@ -407,11 +408,9 @@ class LanguageModelingModel:
         model = self.model
         args = self.args
         tokenizer = self.tokenizer
+        lazy_loaded = args.dataset_type == "line_by_line_lazy"
 
-        def collate(examples: List[torch.Tensor]):
-            if tokenizer._pad_token is None:
-                return pad_sequence(examples, batch_first=True)
-            return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)
+        collate = make_collate(tokenizer, args.block_size, lazy = lazy_loaded)
 
         if self.is_world_master():
             tb_writer = SummaryWriter(logdir=args.tensorboard_dir)
@@ -523,8 +522,14 @@ class LanguageModelingModel:
                 if steps_trained_in_current_epoch > 0:
                     steps_trained_in_current_epoch -= 1
                     continue
-
-                inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
+                
+                if lazy_loaded:
+                    input_ids, attention_mask = batch
+                    inputs, labels = mask_tokens(input_ids, tokenizer, args) if args.mlm else (input_ids, input_ids)
+                    labels = labels.masked_fill(attention_mask == 0, -100)
+                else:
+                    inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
+                
                 inputs = inputs.to(self.device)
                 labels = labels.to(self.device)
 
@@ -786,13 +791,11 @@ class LanguageModelingModel:
         args = self.args
         eval_output_dir = output_dir
         tokenizer = self.tokenizer
+        lazy_loaded = args.dataset_type == "line_by_line_lazy"
 
         results = {}
 
-        def collate(examples: List[torch.Tensor]):
-            if tokenizer._pad_token is None:
-                return pad_sequence(examples, batch_first=True)
-            return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)
+        collate = make_collate(tokenizer, args.block_size, lazy= args.dataset_type == "line_by_line_lazy")
 
         eval_sampler = SequentialSampler(eval_dataset)
         eval_dataloader = DataLoader(
@@ -807,9 +810,17 @@ class LanguageModelingModel:
         model.eval()
 
         for batch in tqdm(eval_dataloader, disable=args.silent or silent, desc="Running Evaluation"):
-            inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
+            
+            if lazy_loaded:
+                input_ids, attention_mask = batch
+                inputs, labels = mask_tokens(input_ids, tokenizer, args) if args.mlm else (input_ids, input_ids)
+                labels = labels.masked_fill(attention_mask == 0, -100)
+            else:
+                inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
+                
             inputs = inputs.to(self.device)
             labels = labels.to(self.device)
+            
             with torch.no_grad():
                 outputs = model(inputs, masked_lm_labels=labels) if args.mlm else model(inputs, labels=labels)
                 if args.model_type == "electra":
@@ -860,6 +871,8 @@ class LanguageModelingModel:
                 return TextDataset(tokenizer, file_path, args.block_size, overwrite_cache=True)
             elif dataset_type == "line_by_line":
                 return LineByLineTextDataset(tokenizer, file_path, args.block_size)
+            elif dataset_type == "line_by_line_lazy":
+                return LineByLineLazyTextDataset(file_path)
             else:
                 special_tokens_count = 3 if bool(args.model_type in ["roberta", "camembert", "xlmroberta"]) else 2
                 if self.args.max_seq_length > 509 and self.args.model_type != "longformer":
@@ -1069,3 +1082,45 @@ class LanguageModelingModel:
         even when training on multiple machines.
         """
         return self.args.local_rank == -1 or torch.distributed.get_rank() == 0
+
+def make_collate(tokenizer, block_size, lazy=False):
+        """
+        Constructs collate function for Dataloader.
+        :param tokenizer: tokenizer object (instantiated) used to tokenize lines of text.
+        :param block_size: (int) tokenized sequences truncated so as to not exceed this length.
+        :param lazy: (bool) whether or not to use return a collate function for lazy text loading.
+        :return: (fn: list[str or torch.tensor[int] (1d)] -> torch.tensor[int] (2d)
+        """
+
+        def lazy_collate(examples):
+            """
+            Dataloader collate_fn for Lazy data loading.
+            :param examples: (list[str]) the text lines to be collated in this batch.
+            :return: (torch.tensor) of the tokenized examples padded/truncated to form a 2d tensor of ints.
+            """
+            # We need to filter empty strings in examples.
+            # LazyLineByLineTextDataset will return empty string if there is an error when reading a line in the data file.
+            examples = tokenizer.batch_encode_plus(
+                [ex for ex in examples if ex],
+                max_length=block_size,
+                return_tensors="pt",
+                pad_to_max_length=True,
+                return_attention_mask=True,
+            )
+            return examples["input_ids"], examples["attention_mask"]
+
+        def simple_collate(examples):
+            """
+            Dataloader collate_fn for Lazy data loading.
+            :param examples: (list[torch.tensor]) the tokenized text examples (as tensors) to be collated in this batch.
+            :return: (torch.tensor) of the tokenized examples padded/truncated to form a 2d tensor of ints.
+            """
+            if tokenizer._pad_token is None:
+                return pad_sequence(examples, batch_first=True)
+            return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)
+
+        if lazy:
+            return lazy_collate
+        else:
+            return simple_collate
+
