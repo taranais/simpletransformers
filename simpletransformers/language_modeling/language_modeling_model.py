@@ -566,8 +566,8 @@ class LanguageModelingModel:
                     continue
                 
                 if lazy_loaded:
-                    input_ids, attention_mask = batch
-                    inputs, labels = mask_tokens(input_ids, tokenizer, args) if args.mlm else (input_ids, input_ids)
+                    #input_ids, attention_mask = batch
+                    inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
                     labels = labels.masked_fill(attention_mask == 0, -100)
                 else:
                     inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
@@ -855,9 +855,9 @@ class LanguageModelingModel:
 
         for batch in tqdm(eval_dataloader, disable=args.silent or silent, desc="Running Evaluation"):
             
-            if lazy_loaded:
-                input_ids, attention_mask = batch
-                inputs, labels = mask_tokens(input_ids, tokenizer, args) if args.mlm else (input_ids, input_ids)
+           if lazy_loaded:
+                #input_ids, attention_mask = batch
+                inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
                 labels = labels.masked_fill(attention_mask == 0, -100)
             else:
                 inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
